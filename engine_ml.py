@@ -86,8 +86,6 @@ class MLEngine:
             y_data = self.dataset.scaler.inverse_transform(self.valid_y)
             inverse_pred = self.dataset.get_inverse(np.array(predicted_data))
             self._write_result(inverse_pred, y_data, "validate", out_path)
-        else:
-            self._write_result(predicted_data, self.valid_y, "validate", out_path)
 
         # test result
         self.test(out_path)
