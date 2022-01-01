@@ -58,7 +58,6 @@ class LSTMNetwork(nn.Module):
         h0 = Variable(torch.zeros(self.layer_dim, x.size(0), self.hidden_dim)).to(self.device)
         c0 = Variable(torch.zeros(self.layer_dim, x.size(0), self.hidden_dim)).to(self.device)
 
-
         #One time step (the last one perhaps?)
         out, (hn,cn) = self.network(x, (h0, c0))
         #print("out:", out.size())

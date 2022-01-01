@@ -8,11 +8,13 @@ from scipy.stats import uniform
 import numpy as np
 import random
 
+from models.elm import elm
+
 class MLModels:
     """
     Consists of Scikit-learn model instances
     """
-    def __init__(self, model_name, best_fit=False, seed=123):
+    def __init__(self, model_name, feat_size, best_fit=False, seed=123):
         """
         Constructor for MLModels
 
@@ -26,6 +28,7 @@ class MLModels:
         np.random.seed(seed)
         self.seed = seed
         self.model_name = model_name
+        self.feat_size = feat_size
         self.random_seed = seed
         self.best_fit = best_fit
         self.param_dict, self.__model = self.get_skmodel()
@@ -99,12 +102,27 @@ class MLModels:
                                      random_state=self.seed)
             return param, model
 
+        def elm_model():
+            param_dict = dict(
+                hidden_units = [16, 32, 64, 128, 256, 512],
+                C = [0.1, 0.25, 0.5, 1.0, 2.0],
+            )
+            param = self._choice(param_dict)
+            model = elm(algorithm='solution1',
+                        activation_function='relu',
+                        one_day = 13,
+                        input_shape = self.feat_size,
+                        **param)
+            return param, model
+
         if self.model_name == 'svr':
             param_dict, model = svr_model()
         elif self.model_name == 'rf':
             param_dict, model = rf_model()
         elif self.model_name == 'mlp':
             param_dict, model = mlp_model()
+        elif self.model_name == 'elm':
+            param_dict, model = elm_model()
         else:
             return
         return param_dict, model
@@ -120,7 +138,10 @@ class MLModels:
         Returns:
             model : Scikit-learn multi output model.
         """
-        self.__model = MultiOutputRegressor(model)
+        if self.model_name not in ["elm"]:
+            self.__model = MultiOutputRegressor(model)
+        else:
+            self.__model = model
         return self.model
 
     def search_best_param(self, X, y):

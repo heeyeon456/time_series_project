@@ -59,15 +59,14 @@ class DLEngine:
             self.make_loader(self.dataset, status="train")
 
         print("ts model:")
-        num_feat = len(self.args.additional_feat) + 1
+        num_feat = len(self.args.additional_feat)
         input_dim = one_day
         self.ts_model = LSTMNetwork(input_dim=input_dim,
                                     hidden_size=self.args.hidden_layer_num,
                                     output_dim=self.args.hidden_layer_num,
                                     num_feat=1,
                                     device=self.device,
-                                    layer_dim=1,
-                                    dropout=0.1)
+                                    layer_dim=1)
 
         print("add model:")
         if self.args.model_to_use == "mlp":
@@ -77,7 +76,7 @@ class DLEngine:
                                         output_dim=self.args.add_hidden_layer_num)
 
         elif self.args.model_to_use == "tcn":
-            input_dim = input_dim + 24
+            input_dim = input_dim + one_day
             channel_list = [input_dim, input_dim // 2, input_dim // 4]
             self.args.add_hidden_layer_num = (input_dim // 4) * num_feat
             self.add_model = TemporalCNNNetwork(input_dim=input_dim,
@@ -86,23 +85,23 @@ class DLEngine:
                                                 dropout=0.1)
 
         elif self.args.model_to_use == "lstm":
-            input_dim = one_day // 4
+            input_dim = one_day
             self.add_model = LSTMNetwork(input_dim=input_dim,
                                         hidden_size=self.args.add_hidden_layer_num,
                                         output_dim=self.args.add_hidden_layer_num,
                                         num_feat=num_feat,
                                         device=self.device,
-                                        layer_dim=2,
+                                        layer_dim=1,
                                         dropout=0.1)
 
         elif self.args.model_to_use == "cnn_lstm":
-            input_dim = one_day // 4
+            input_dim = one_day
             self.add_model = CNNLSTMNetwork(input_dim=input_dim,
                                             hidden_size=self.args.add_hidden_layer_num,
                                             output_dim=self.args.add_hidden_layer_num,
                                             num_feat=num_feat,
                                             device=self.device,
-                                            layer_dim=1,
+                                            layer_dim=2,
                                             dropout=0.2)
             print(self.add_model)
         else:
@@ -197,14 +196,16 @@ class DLEngine:
         return dataset
 
     def _split_dataset(self, dataset, valid_ratio, test_ratio):
-        indices = set(range(dataset.__len__()))
-        test_idx = round(test_ratio * dataset.__len__())
-        # dataset_train = torch.utils.data.Subset(dataset, indices[:split_train_idx])
-        # dataset_val = torch.utils.data.Subset(dataset, indices[split_train_idx:])
-        test_indices = set(random.sample(indices, test_idx))
-        train_indices = indices.difference(test_indices)
-        dataset_train = torch.utils.data.Subset(dataset, list(train_indices))
-        dataset_test = torch.utils.data.Subset(dataset, list(test_indices))
+        indices = list(range(dataset.__len__()))
+        split_train_idx = round((1-test_ratio) * dataset.__len__())
+        dataset_train = torch.utils.data.Subset(dataset, indices[:split_train_idx])
+        dataset_test = torch.utils.data.Subset(dataset, indices[split_train_idx:])
+        
+        # indices = set(range(dataset.__len__()))
+        # test_indices = set(random.sample(indices, test_idx))
+        # train_indices = indices.difference(test_indices)
+        # dataset_train = torch.utils.data.Subset(dataset, list(train_indices))
+        # dataset_test = torch.utils.data.Subset(dataset, list(test_indices))
         dataset_val = None
 
         if valid_ratio != 0:
@@ -218,7 +219,8 @@ class DLEngine:
         print("test examples: {}".format(len(dataset_test)))
         if dataset_val is not None:
             print("validating examples: {}".format(len(dataset_val)))
-        return dataset_train, dataset_val, dataset_test
+        print()
+        return dataset_train, dataset_test, dataset_val
 
     def train_one_epoch(self, epoch):
         """
@@ -361,9 +363,9 @@ class DLEngine:
                 add_embd = self.add_model.forward(data2_x)
                 pred = self.regressor_model.forward(ts_embd, add_embd)
 
-                reverse_pred = self.dataset.scaler.get_inverse(
+                reverse_pred = self.dataset.scaler.inverse_transform(
                         pred.cpu().detach().numpy())
-                reverse_real = self.dataset.scaler.get_inverse(
+                reverse_real = self.dataset.scaler.inverse_transform(
                         data_y.numpy())
 
                 pred_result.extend(reverse_pred)
@@ -372,19 +374,11 @@ class DLEngine:
         self._write_result(pred_result, real_result,
                            status="total", out_path=out_path)
 
-        if self.type != "long" and self.args.show_each_output:
-            for i in range(self.args.time_of_pred):
-                print("Each Result of {}th Output Results".format(str(i)))
-                self._write_result(np.array(pred_result)[:, i], np.array(real_result)[:, i],
-                                   status="each", out_path=out_path)
 
     def _write_result(self, pred, real, status, out_path=None):
         pred = np.array(pred)
         real = np.array(real)
-        if self.system_id is None:
-            output_filename = "total_{}_result.out".format(status)
-        else:
-            output_filename = "{}_result.out".format(status)
+        output_filename = "{}_result.out".format(status)
 
         utils.draw_plot(pred, real, length=196, save_path=out_path, filename=status)
         if status != "validate":
@@ -402,7 +396,6 @@ class DLEngine:
             np.savetxt(os.path.join(out_path, "pred.txt"), pred)
             np.savetxt(os.path.join(out_path, "real.txt"), real)
 
-
         print("-----------------------------------\n")
         print("RMSE: %.4f\n" % (calcRMSE(real, pred)))
         print("MAE: %.4f\n" % (calcMAE(real, pred)))
@@ -411,17 +404,12 @@ class DLEngine:
         print("-----------------------------------")
 
 
-    def _save_model(self):
+    def _save_model(self, model_name=""):
         output_path = utils.numbered_modelname(
-            self.args.model_dir, self.args.model_to_use, self.args.model_name)
+            self.args.model_dir, self.args.model_to_use, model_name)
         model_dict = {"ts": self.ts_model, "add": self.add_model, "reg": self.regressor_model}
         ckpt_dict = {}
-        if self.seasonal is not None:
-            model_name = "{}_{}.pt".format(self.args.model_to_use, self.seasonal)
-        elif self.holiday is not None:
-            model_name = "{}_{}.pt".format(self.args.model_to_use, self.holiday)
-        else:
-            model_name = "{}.pt".format(self.args.model_to_use)
+        model_name = "{}.pt".format(self.args.model_to_use)
 
         for k, v in model_dict.items():
             ckpt_dict[k] = v.state_dict()

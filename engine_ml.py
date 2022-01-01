@@ -26,23 +26,14 @@ class MLEngine:
         """
         self.args = args
 
+        self.train_days = args.train_days
+
         self.dataset = self._get_dataset()
-        if self.args.phase == "train":
-            self.train_X, self.train_y = self.dataset.data
-            if self.args.validation:
-                self.train_X, self.train_y, self.valid_X, self.valid_y =self.dataset.split_valid(
-                    self.train_X, self.train_y, ratio=0.9)
+        self.data_X, self.data_y = self.dataset.data
 
-            # scale data
-            self.train_y = self.dataset.scaler.transform(self.train_X)
-            self.train_y = self.dataset.scaler.transform(self.train_X)
-
-        elif self.args.phase == "test":
-            self.test_X, self.test_y, _, _ = self.dataset.data
-            self.test_X, self.test_y = self._scale_data(self.test_X, self.test_y)
-
-        self.model = MLModels(model_name=self.args.model_to_use)
-
+        self.scaler = self.dataset.scaler
+        self.model = MLModels(model_name=self.args.model_to_use,
+                              feat_size = self.data_X.shape[1])
         self.wrapper_model = None
 
     def _get_dataset(self):
@@ -56,10 +47,6 @@ class MLEngine:
         return dataset
 
     def train(self):
-        """
-        It trains the scikit-learn model.
-        It has no batch (train at once).
-        """
         # train model
         print("\nTrain '{}' model..".format(self.args.target))
         print("- Input: use features of past {} days (additional features: {})".format(
@@ -67,64 +54,54 @@ class MLEngine:
         print("- Output: predict one-day head '{} outputs \n".format(
                         self.args.outdim))
 
-        if len(self.train_y) == 0:
-            warnings.warn("Pass training model")
-            return
+        train_days = self.train_days
         model = self.model.model
         self.wrapper_model = self.model.get_multi_out_model(model)
-
-        self.model.forward(self.train_X, self.train_y)
         print(self.wrapper_model)
+    
+        predictedY, testY = [], []
 
-        if self.args.save_model:
-            out_path = self._save_model()
+        #for x in range(1, len(self.data_y)):
+        for x in range(1, 3):
+            if x < train_days:
+                trainX, trainY = self.data_X[:x+1], self.data_y[:x+1]
+            else:
+                trainX, trainY = self.data_X[x-train_days:x+1], self.data_y[x-train_days:x+1]
 
-        # check validation result
-        if self.args.validation:
-            predicted_data = self.model.predict(self.valid_X)
 
-            y_data = self.dataset.scaler.inverse_transform(self.valid_y)
-            inverse_pred = self.dataset.get_inverse(np.array(predicted_data))
-            self._write_result(inverse_pred, y_data, "validate", out_path)
+            pred_y = self.scaler.inverse_transform(
+                self.train_oneday(trainX, trainY))
+            predictedY.append(pred_y)
+            test_y = self.scaler.inverse_transform(
+                self.data_y[x]
+            )
+            testY.append(test_y)
+
+        self._write_result(predictedY, testY, out_path=self.args.model_dir)
+
+    def train_oneday(self, dataX, dataY):
+        """
+        It trains the scikit-learn model.
+        It has no batch (train at once).
+        """
+        trainX, trainY = dataX[:-1], dataY[:-1]
+        testX = dataX[-1].reshape(1, -1)
+
+        if len(trainY) == 0:
+            warnings.warn("Pass training model")
+            return
+
+        self.model.forward(trainX, trainY)
 
         # test result
-        self.test(out_path)
+        predicted = self.model.predict(testX)
+        return predicted
 
-    def test(self, out_path: str = None):
-        """
-        It tests the trained scikit-learn model.
-
-        Args:
-            out_path (str, optional): Output path that saves the model weights and results.
-                                      Defaults to None.
-        """
-        if out_path is None:
-            self.model = self._load_model()
-            out_path = "/".join(self.args.ckpt_path.split("/")[:-1])
-        predicted_data = self.model.predict(self.test_X)
-
-        y_data = self.dataset.scaler.inverse_transform(self.test_y)
-        inverse_pred = self.dataset.scaler.inverse_transform(np.array(predicted_data))
-        pred, real = inverse_pred, y_data
-
-        print("Total Mean of Multi Output Results")
-        self._write_result(pred, real, "test", out_path)
-        if self.args.show_each_output:
-            for i in range(self.args.time_of_pred):
-                print("Each Result of {}th Output Results".format(str(i)))
-                self._write_result(pred[:, i], real[:, i],
-                                   status="each", out_path=out_path)
-
-    def _write_result(self, pred, real, status, out_path):
+    def _write_result(self, pred, real, out_path="."):
         pred = np.array(pred)
         real = np.array(real)
 
-        if self.system_id is None:
-            output_filename = "total_{}_result.out".format(status)
-        else:
-            output_filename = "{}_result.out".format(status)
-
-        utils.draw_plot(pred, real, length=196, save_path=out_path, filename=status)
+        output_filename = f"{self.args.model_to_use}_result.out"
 
         with open(os.path.join(out_path, output_filename), 'a') as f:
             f.write("-----------------------------------\n")

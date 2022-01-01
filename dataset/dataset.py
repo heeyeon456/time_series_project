@@ -3,6 +3,7 @@ import time
 
 import numpy as np
 import pandas as pd
+from datetime import datetime, time, timedelta
 
 import torch
 from torch.utils.data import Dataset
@@ -13,6 +14,7 @@ from dataset.scaler import DefinedMinMaxScaler
 import warnings
 warnings.filterwarnings('ignore')
 
+to_date = lambda date: datetime.strptime(str(date), "%Y%m%d")
 
 class TimeSeriesListDataset(object):
     """
@@ -38,23 +40,42 @@ class TimeSeriesListDataset(object):
         self.output_dim = output_dim
         self.status = status
         self.weat_feat = weat_feat
+        self.one_day = 13
 
         self.__dataX, self.__dataY = self._preprocess()
 
-    def _preprocess(self):
-        data = pd.read_csv(self.data_path)
-        for feat in self.weat_feat:
-            scaler = MinMaxScaler()
-            data.loc[:, feat] = scaler.fit_transform(data.loc[:, feat].values.reshape(-1, 1))
+    def _make_continuous_data(self, df, one_day):
+        # make time list
+        hhmm_list = []
+        for h in range(6, 19):
+            time_ = time(hour=h).isoformat(timespec='minutes')
+            f_time = int("".join(time_.split(":")))
+            hhmm_list.append(f_time)
 
-        data.loc[:, self.target] = self.scaler.transform(data.loc[:, self.target])
+        new_row_list = []
+        index_list = list(df.index)
+        for i in range(0, len(df)-one_day, one_day):
+            d = index_list[i]
+            cur = to_date(df.loc[d, 'yyyymmdd'])
+            nxt = to_date(df.loc[d+one_day, 'yyyymmdd'])
 
-        trainX, trainY = self._make_dataset(data, self.lag, self.output_dim)
-        trainX = np.array(trainX)
-        trainY = np.array(trainY)
-        print("dataX shape: ", trainX.shape)
-        print("dataY shape: ", trainY.shape)
-        return trainX, trainY
+            while nxt > cur + timedelta(days=1):
+                for h in hhmm_list:
+                    str_d = str(cur + timedelta(days=1)).split(" ")[0]
+                    cur_date = str_d + " " + str(h)
+                    int_d = int("".join(str_d.split("-")))
+                    row_data = {'yyyymmdd': int_d, 'hhmm': h}
+
+                    for c in df.columns:
+                        if c not in row_data.keys():
+                            row_data[c] = np.nan
+                    new_row_list.append(row_data)
+                cur = cur + timedelta(days=1)
+
+        df = df.append(new_row_list, ignore_index=True)
+        df = df.sort_values(by=['yyyymmdd', 'hhmm'])
+        df.index = np.arange(0, len(df))
+        return df
 
     def _make_dataset(self, df, lag, outdim):
         dataX, dataY = [], []
@@ -66,6 +87,80 @@ class TimeSeriesListDataset(object):
             dataX.append(tmp)
             dataY.append(df.loc[i+lag:i+lag+outdim-1, self.target])
         return dataX, dataY
+
+    # Sliding_window_view
+    def _sliding_window_view(self, arr, window_shape, steps):
+        """
+        sliding window using different size of window and step
+        Reference code:
+            https://gist.github.com/meowklaski/4bda7c86c6168f3557657d5fb0b5395a
+        """ 
+        in_shape = np.array(arr.shape[-len(steps):])
+        window_shape = np.array(window_shape)
+        steps = np.array(steps)
+        nbytes = arr.strides[-1]
+
+        window_strides = tuple(np.cumprod(arr.shape[:0:-1])[::-1]) + (1,)
+        step_strides = tuple(window_strides[-len(steps):] * steps) 
+        strides = tuple(int(i) * nbytes for i in step_strides + window_strides)
+
+        outshape = tuple((in_shape - window_shape) // steps + 1) 
+        outshape = outshape + arr.shape[:-len(steps)] + tuple(window_shape) 
+        return np.lib.stride_tricks.as_strided(arr, shape=outshape, strides=strides, writeable=False)
+
+    def _make_dataset_vectorized(self, df, window, one_day, target_col = 'Active_Power', weat_feat=[]):
+        size_of_arr = (len(df) - window) // one_day
+        dataX, dataY = np.zeros((size_of_arr, 0)), np.zeros((0, one_day))
+
+        # Previous target column feature
+        if window != 0:
+            series = df[target_col].values[:-one_day]
+            tmpX = self._sliding_window_view(
+                series, window_shape=(window, ), steps=(one_day, ))
+
+            dataX = np.hstack((dataX, tmpX))
+
+        # Real data to predict
+        series = df[target_col].values[window:]
+        dataY = self._sliding_window_view(
+            series, window_shape=(one_day, ), steps=(one_day, ))
+
+        window += one_day
+        # Weather Feature
+        for feat in weat_feat:
+            series = df[feat].values
+            tmpX = self._sliding_window_view(
+                series, window_shape=(window, ), steps=(one_day, ))
+            dataX = np.hstack((dataX, tmpX))
+
+        # remove nan data
+        remove_row = np.isnan(dataX).any(axis=1)
+        dataX, dataY = dataX[~remove_row, :], dataY[~remove_row, :]
+        remove_row = np.isnan(dataY).any(axis=1)
+        dataX, dataY = dataX[~remove_row, :], dataY[~remove_row, :]
+
+        return dataX, dataY
+
+    def _preprocess(self, scale=False):
+        data = pd.read_csv(self.data_path)
+        data[self.target] = data[self.target] * 1000
+        data = self._make_continuous_data(data, self.one_day)
+
+        for feat in self.weat_feat:
+            scaler = MinMaxScaler()
+            data.loc[:, feat] = scaler.fit_transform(data.loc[:, feat].values.reshape(-1, 1))
+
+        data.loc[:, self.target] = self.scaler.transform(data.loc[:, self.target])
+
+        trainX, trainY = self._make_dataset_vectorized(
+            df=data,
+            window=self.lag,
+            one_day=self.one_day,
+            weat_feat=self.weat_feat)
+
+        print("dataX shape: ", trainX.shape)
+        print("dataY shape: ", trainY.shape)
+        return trainX, trainY
 
     @property
     def scaler(self):
